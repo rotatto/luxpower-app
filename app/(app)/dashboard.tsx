@@ -7,6 +7,8 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { LineChart } from 'react-native-chart-kit';
 import { useRealtime } from '../../src/hooks/useRealtime';
 import { luxPowerService } from '../../src/services/luxpower';
+import { EnergyKPICards } from '../../src/components/EnergyKPICards';
+import { MonthlyBarChart } from '../../src/components/MonthlyBarChart';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
@@ -25,9 +27,24 @@ export default function DashboardScreen() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [activeChart, setActiveChart] = useState<'soc' | 'grid' | 'battery' | 'consumption'>('soc');
 
+  const [energyInfo, setEnergyInfo] = useState<Record<string, string>>({});
+  const [loadingEnergy, setLoadingEnergy] = useState(true);
+
+  const now = new Date();
+  const [chartMonth, setChartMonth] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 });
+  const [monthlyData, setMonthlyData] = useState<any[]>([]);
+  const [loadingMonthly, setLoadingMonthly] = useState(true);
+
   useEffect(() => {
-    if (serialNum) loadHistory();
+    if (serialNum) {
+      loadHistory();
+      loadEnergyInfo();
+    }
   }, [serialNum]);
+
+  useEffect(() => {
+    if (serialNum) loadMonthly(chartMonth.year, chartMonth.month);
+  }, [serialNum, chartMonth]);
 
   async function loadHistory() {
     setLoadingHistory(true);
@@ -46,6 +63,47 @@ export default function DashboardScreen() {
     } finally {
       setLoadingHistory(false);
     }
+  }
+
+  async function loadEnergyInfo() {
+    setLoadingEnergy(true);
+    try {
+      const result = await luxPowerService.getEnergyInfo(serialNum);
+      setEnergyInfo(result ?? {});
+    } catch (e) {
+      console.error('[Dashboard] Erro energyInfo:', e);
+    } finally {
+      setLoadingEnergy(false);
+    }
+  }
+
+  async function loadMonthly(year: number, month: number) {
+    setLoadingMonthly(true);
+    try {
+      const result = await luxPowerService.getMonthly(serialNum, year, month);
+      setMonthlyData(Array.isArray(result) ? result : []);
+    } catch (e) {
+      console.error('[Dashboard] Erro monthly:', e);
+      setMonthlyData([]);
+    } finally {
+      setLoadingMonthly(false);
+    }
+  }
+
+  function handlePrevMonth() {
+    setChartMonth((prev) => {
+      if (prev.month === 1) return { year: prev.year - 1, month: 12 };
+      return { year: prev.year, month: prev.month - 1 };
+    });
+  }
+
+  function handleNextMonth() {
+    setChartMonth((prev) => {
+      const today = new Date();
+      if (prev.year === today.getFullYear() && prev.month === today.getMonth() + 1) return prev;
+      if (prev.month === 12) return { year: prev.year + 1, month: 1 };
+      return { year: prev.year, month: prev.month + 1 };
+    });
   }
 
   function parseHistory(raw: any): ChartPoint[] {
@@ -149,7 +207,7 @@ export default function DashboardScreen() {
   return (
     <ScrollView
       style={styles.container}
-      refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => { refetch(); loadHistory(); }} tintColor="#f59e0b" />}
+      refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => { refetch(); loadHistory(); loadEnergyInfo(); loadMonthly(chartMonth.year, chartMonth.month); }} tintColor="#f59e0b" />}
     >
       {/* Header */}
       <View style={styles.header}>
@@ -189,6 +247,16 @@ export default function DashboardScreen() {
           </View>
         ))}
       </View>
+
+      {/* KPIs de Energia */}
+      <Text style={styles.sectionTitle}>ENERGIA — HOJE / TOTAL</Text>
+      {loadingEnergy ? (
+        <View style={styles.energyLoading}>
+          <ActivityIndicator color="#f59e0b" size="small" />
+        </View>
+      ) : (
+        <EnergyKPICards data={energyInfo} />
+      )}
 
       {/* Bateria */}
       <View style={[styles.card, isOffline && { opacity: 0.5 }]}>
@@ -283,6 +351,17 @@ export default function DashboardScreen() {
         )}
       </View>
 
+      {/* Gráfico Mensal */}
+      <Text style={styles.sectionTitle}>HISTÓRICO MENSAL</Text>
+      <MonthlyBarChart
+        data={monthlyData}
+        loading={loadingMonthly}
+        year={chartMonth.year}
+        month={chartMonth.month}
+        onPrevMonth={handlePrevMonth}
+        onNextMonth={handleNextMonth}
+      />
+
       {/* Inversor */}
       <View style={styles.card}>
         <Text style={styles.cardLabel}>INVERSOR</Text>
@@ -335,4 +414,5 @@ const styles = StyleSheet.create({
   chartSummaryValue: { fontSize: 16, fontWeight: '800', marginTop: 3 },
   inverterModel: { fontSize: 16, fontWeight: '700', color: '#f8fafc' },
   footer: { textAlign: 'center', color: '#334155', fontSize: 11, padding: 20 },
+  energyLoading: { height: 80, justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
 });
