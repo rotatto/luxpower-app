@@ -1,4 +1,4 @@
-const PROXY_URL = 'http://10.0.2.2:3000';
+const PROXY_URL = 'http://192.168.33.39:3000';
 
 class LuxPowerService {
 
@@ -41,17 +41,35 @@ class LuxPowerService {
   }
 
   async getRuntime(serialNum: string) {
+  try {
     const res = await fetch(`${PROXY_URL}/runtime/${serialNum}`);
     const data = await res.json();
-    return data.data;
+    console.log('[LuxPower] Runtime raw:', JSON.stringify(data).substring(0, 200));
+    return data.data ?? data ?? {};
+  } catch (e) {
+    console.error('[LuxPower] Erro no runtime:', e);
+    return {};
   }
-
+}
   async getHistory(serialNum: string, date?: string) {
     const dateParam = date ? `?date=${date}` : '';
     const res = await fetch(`${PROXY_URL}/history/${serialNum}${dateParam}`);
     const data = await res.json();
     console.log('[LuxPower] Histórico:', JSON.stringify(data).substring(0, 200));
     return data;
+}
+
+async getDeyeStations() {
+  const res = await fetch(`${PROXY_URL}/deye/stations`);
+  const data = await res.json();
+  console.log('[Deye] Estações:', data.total);
+  return data.stations ?? [];
+}
+
+async getDeyeRealtime(stationId: number) {
+  const res = await fetch(`${PROXY_URL}/deye/realtime/${stationId}`);
+  const data = await res.json();
+  return data.data;
 }
 }
 
