@@ -166,7 +166,18 @@ class LuxPowerService {
   async getMonthly(serialNum: string, year: number, month: number) {
     return withSessionRetry(async (sessionId) => {
       const data = await luxInvoke({ action: 'monthly', sessionId, serialNum, year, month, parallel: false });
-      return data.data ?? [];
+      const raw: any[] = data.data ?? [];
+      return raw.map((p: any) => ({
+        day: Number(p.day ?? 0),
+        ePv1Day: Number(p.ePv1Day ?? 0) / 10,
+        ePv2Day: Number(p.ePv2Day ?? 0) / 10,
+        ePv3Day: Number(p.ePv3Day ?? 0) / 10,
+        eRecDay: Number(p.eRecDay ?? 0) / 10,
+        eToGridDay: Number(p.eToGridDay ?? 0) / 10,
+        eConsumptionDay: Number(p.eConsumptionDay ?? 0) / 10,
+        eChgDay: Number(p.eChgDay ?? 0) / 10,
+        eDisChgDay: Number(p.eDisChgDay ?? 0) / 10,
+      }));
     });
   }
 

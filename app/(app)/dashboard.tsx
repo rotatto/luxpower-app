@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, ActivityIndicator, Dimensions
+  RefreshControl, ActivityIndicator, Dimensions,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { LineChart } from 'react-native-chart-kit';
@@ -12,54 +12,97 @@ import { MonthlyBarChart } from '../../src/components/MonthlyBarChart';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
+// ── Design tokens (matching solar-shine-dash) ─────────────────────────────────
+const C = {
+  solar: '#bad700',
+  grid: 'hsl(0, 85%, 55%)',      // red
+  battery: 'hsl(142, 76%, 45%)', // green
+  consumption: 'hsl(280, 65%, 55%)', // purple
+  soc: 'hsl(45, 93%, 47%)',      // amber
+  bg: '#0f172a',
+  card: '#1e293b',
+  border: '#334155',
+  text: '#f8fafc',
+  muted: '#64748b',
+  sub: '#94a3b8',
+};
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 interface ChartPoint {
   time: string;
   soc: number;
-  grid: number;
-  battery: number;
-  consumption: number;
+  grid: number;       // W  (gridPower from API)
+  battery: number;    // W  (batteryDischarging from API)
+  consumption: number;// W  (consumption from API)
+  solar: number;      // W  (solarPv from API)
 }
 
+type ChartTab = 'power' | 'soc';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function toNum(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function safeArr(arr: number[]): number[] {
+  return arr.map((v) => (isNaN(v) || !isFinite(v) ? 0 : v));
+}
+
+function kw(w: number) {
+  return Math.abs(w) / 1000;
+}
+
+function formatKw(w: number) {
+  return `${(Math.abs(w) / 1000).toFixed(1)}kW`;
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
 export default function DashboardScreen() {
   const { serialNum, plantName } = useLocalSearchParams<{ serialNum: string; plantName: string }>();
   const { data, isLoading, refetch, isRefetching } = useRealtime(serialNum);
+
   const [history, setHistory] = useState<ChartPoint[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
-  const [activeChart, setActiveChart] = useState<'soc' | 'grid' | 'battery' | 'consumption'>('soc');
+  const [chartTab, setChartTab] = useState<ChartTab>('power');
 
   const [energyInfo, setEnergyInfo] = useState<Record<string, string>>({});
   const [loadingEnergy, setLoadingEnergy] = useState(true);
 
   const now = new Date();
-  const [chartMonth, setChartMonth] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 });
+  const [chartMonth, setChartMonth] = useState({
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+  });
   const [monthlyData, setMonthlyData] = useState<any[]>([]);
   const [loadingMonthly, setLoadingMonthly] = useState(true);
 
+  // ── Data loading ──────────────────────────────────────────────────────────
+
   useEffect(() => {
-    if (serialNum) {
-      loadHistory();
-      loadEnergyInfo();
-    }
+    if (!serialNum) return;
+    loadHistory();
+    loadEnergyInfo();
   }, [serialNum]);
 
   useEffect(() => {
-    if (serialNum) loadMonthly(chartMonth.year, chartMonth.month);
+    if (!serialNum) return;
+    loadMonthly(chartMonth.year, chartMonth.month);
   }, [serialNum, chartMonth]);
 
   async function loadHistory() {
     setLoadingHistory(true);
     try {
       const result = await luxPowerService.getHistory(serialNum);
-      console.log('[Dashboard] Histórico raw:', JSON.stringify(result).substring(0, 500));
-
-      if (result?.data) {
-        const parsed = parseHistory(result.data);
-        setHistory(parsed);
+      const raw = result?.data;
+      if (Array.isArray(raw) && raw.length > 0) {
+        setHistory(parseHistory(raw));
+      } else {
+        setHistory([]);
       }
     } catch (e) {
       console.error('[Dashboard] Erro histórico:', e);
-      // Gera dados simulados se a API não retornar histórico
-      setHistory(generateMockHistory());
+      setHistory([]);
     } finally {
       setLoadingHistory(false);
     }
@@ -90,133 +133,133 @@ export default function DashboardScreen() {
     }
   }
 
+  // ── History parser ─────────────────────────────────────────────────────────
+  // LuxPower history fields: time, solarPv, gridPower, consumption, soc, batteryDischarging
+  function parseHistory(raw: any[]): ChartPoint[] {
+    return raw.map((item: any) => ({
+      time: String(item.time ?? ''),
+      soc: toNum(item.soc),
+      grid: toNum(item.gridPower),
+      battery: toNum(item.batteryDischarging),
+      consumption: toNum(item.consumption),
+      solar: toNum(item.solarPv),
+    }));
+  }
+
+  // ── Month navigation ───────────────────────────────────────────────────────
   function handlePrevMonth() {
-    setChartMonth((prev) => {
-      if (prev.month === 1) return { year: prev.year - 1, month: 12 };
-      return { year: prev.year, month: prev.month - 1 };
-    });
+    setChartMonth((prev) =>
+      prev.month === 1
+        ? { year: prev.year - 1, month: 12 }
+        : { year: prev.year, month: prev.month - 1 }
+    );
   }
 
   function handleNextMonth() {
     setChartMonth((prev) => {
       const today = new Date();
       if (prev.year === today.getFullYear() && prev.month === today.getMonth() + 1) return prev;
-      if (prev.month === 12) return { year: prev.year + 1, month: 1 };
-      return { year: prev.year, month: prev.month + 1 };
+      return prev.month === 12
+        ? { year: prev.year + 1, month: 1 }
+        : { year: prev.year, month: prev.month + 1 };
     });
   }
 
-  function parseHistory(raw: any): ChartPoint[] {
-    // A API pode retornar em diferentes formatos — tentamos os mais comuns
-    const points: ChartPoint[] = [];
-
-    if (Array.isArray(raw)) {
-      raw.forEach((item: any) => {
-        points.push({
-          time: item.time ?? item.dateTime ?? '',
-          soc: Number(item.soc ?? 0),
-          grid: Number(item.pToGrid ?? item.grid ?? 0),
-          battery: Number(item.batPower ?? item.battery ?? 0),
-          consumption: Number(item.consumptionPower ?? item.consumption ?? 0),
-        });
-      });
-    } else if (raw.soc && Array.isArray(raw.soc)) {
-      // Formato { soc: [], grid: [], ... }
-      raw.soc.forEach((val: any, i: number) => {
-        points.push({
-          time: `${i}h`,
-          soc: Number(val ?? 0),
-          grid: Number(raw.pToGrid?.[i] ?? 0),
-          battery: Number(raw.batPower?.[i] ?? 0),
-          consumption: Number(raw.consumptionPower?.[i] ?? 0),
-        });
-      });
-    }
-
-    return points.length > 0 ? points : generateMockHistory();
-  }
-
-  function generateMockHistory(): ChartPoint[] {
-    // Dados simulados para demonstração enquanto mapeamos a API correta
-    return Array.from({ length: 24 }, (_, i) => ({
-      time: `${i}h`,
-      soc: Math.max(10, Math.min(100, 60 + Math.sin(i / 4) * 25)),
-      grid: Math.sin(i / 3) * 800,
-      battery: Math.cos(i / 3) * 600,
-      consumption: 1500 + Math.sin(i / 2) * 500,
-    }));
-  }
-
+  // ── Realtime values ────────────────────────────────────────────────────────
   const isOffline = data?.lost === true;
-  const soc = data?.soc ?? 0;
-  const totalSolar = (data?.ppv1 ?? 0) + (data?.ppv2 ?? 0) + (data?.ppv3 ?? 0);
-  const consumption = data?.consumptionPower ?? 0;
-  const batPower = data?.batPower ?? 0;
-  const pToGrid = data?.pToGrid ?? 0;
+  const soc = toNum(data?.soc);
+  const totalSolar = toNum(data?.ppv1) + toNum(data?.ppv2) + toNum(data?.ppv3);
+  const consumption = toNum(data?.consumptionPower);
+  const batPower = toNum(data?.batPower);
+  const pToGrid = toNum(data?.pToGrid);
 
-  const socColor = isOffline ? '#475569' : soc > 60 ? '#10b981' : soc > 30 ? '#f59e0b' : '#ef4444';
-  const gridColor = pToGrid < -50 ? '#ef4444' : pToGrid > 50 ? '#3b82f6' : '#64748b';
-  const batDirection = batPower < -50 ? '⬇ Descarregando' : batPower > 50 ? '⬆ Carregando' : '● Repouso';
-  const gridStatus = pToGrid < -50 ? 'Importando' : pToGrid > 50 ? 'Exportando' : 'Balanceado';
+  const socColor = isOffline ? C.muted : soc > 60 ? C.battery : soc > 30 ? C.soc : C.grid;
+  const gridIsExporting = pToGrid > 50;
+  const gridIsImporting = pToGrid < -50;
 
-  // Configuração dos gráficos
-  const chartConfigs = {
-    soc: {
-      label: 'SOC — Nível da Bateria',
-      color: socColor,
-      data: history.map(p => Math.max(0, p.soc)),
-      unit: '%',
-      gradient: ['#10b981', '#059669'],
-    },
-    grid: {
-      label: 'Rede Elétrica',
-      color: '#3b82f6',
-      data: history.map(p => Math.abs(p.grid) / 1000),
-      unit: 'kW',
-      gradient: ['#3b82f6', '#2563eb'],
-    },
-    battery: {
-      label: 'Potência da Bateria',
-      color: '#f59e0b',
-      data: history.map(p => Math.abs(p.battery) / 1000),
-      unit: 'kW',
-      gradient: ['#f59e0b', '#d97706'],
-    },
-    consumption: {
-      label: 'Consumo da Casa',
-      color: '#a78bfa',
-      data: history.map(p => Math.max(0, p.consumption) / 1000),
-      unit: 'kW',
-      gradient: ['#a78bfa', '#7c3aed'],
-    },
+  // ── Chart data ─────────────────────────────────────────────────────────────
+  // Reduce to ≤ 48 points for performance
+  const reduced = useMemo(() => {
+    if (history.length <= 48) return history;
+    const step = Math.ceil(history.length / 48);
+    return history.filter((_, i) => i % step === 0);
+  }, [history]);
+
+  const labels = useMemo(
+    () => reduced.map((p) => p.time.substring(0, 5)),
+    [reduced]
+  );
+
+  // Show every 6th label to avoid crowding
+  const sparseLabels = labels.map((l, i) => (i % 6 === 0 ? l : ''));
+
+  // Power chart: solar, grid, battery, consumption — all in kW
+  const powerDatasets = useMemo(() => {
+    const solar = safeArr(reduced.map((p) => kw(p.solar)));
+    const grid  = safeArr(reduced.map((p) => kw(p.grid)));
+    const bat   = safeArr(reduced.map((p) => kw(p.battery)));
+    const cons  = safeArr(reduced.map((p) => kw(p.consumption)));
+    return { solar, grid, bat, cons };
+  }, [reduced]);
+
+  // SOC chart
+  const socData = useMemo(
+    () => safeArr(reduced.map((p) => Math.max(0, Math.min(100, p.soc)))),
+    [reduced]
+  );
+
+  // Peak values for power lines
+  const peaks = useMemo(() => {
+    if (!history.length) return null;
+    let maxSolar = { val: 0, time: '--' };
+    let maxCons  = { val: 0, time: '--' };
+    let maxBat   = { val: 0, time: '--' };
+    history.forEach((p) => {
+      if (p.solar > maxSolar.val) maxSolar = { val: p.solar, time: p.time.substring(0, 5) };
+      if (p.consumption > maxCons.val) maxCons = { val: p.consumption, time: p.time.substring(0, 5) };
+      if (p.battery > maxBat.val) maxBat = { val: p.battery, time: p.time.substring(0, 5) };
+    });
+    return { maxSolar, maxCons, maxBat };
+  }, [history]);
+
+  const hasHistory = reduced.length > 1;
+
+  const chartConfig = {
+    backgroundColor: C.card,
+    backgroundGradientFrom: C.card,
+    backgroundGradientTo: C.bg,
+    decimalPlaces: 1,
+    color: (opacity = 1) => `rgba(186, 215, 0, ${opacity})`,
+    labelColor: () => C.muted,
+    propsForDots: { r: '0' },
+    propsForBackgroundLines: { stroke: C.border, strokeDasharray: '4' },
   };
 
-  const active = chartConfigs[activeChart];
-
-  // Reduz pontos para o gráfico (máx 12 para legibilidade)
-  const chartData = active.data.length > 12
-    ? active.data.filter((_, i) => i % Math.ceil(active.data.length / 12) === 0)
-    : active.data;
-
-  const chartLabels = history.length > 12
-    ? history
-        .filter((_, i) => i % Math.ceil(history.length / 12) === 0)
-        .map(p => p.time.replace(':00', 'h').substring(0, 4))
-    : history.map(p => p.time.replace(':00', 'h').substring(0, 4));
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <ScrollView
       style={styles.container}
-      refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={() => { refetch(); loadHistory(); loadEnergyInfo(); loadMonthly(chartMonth.year, chartMonth.month); }} tintColor="#f59e0b" />}
+      refreshControl={
+        <RefreshControl
+          refreshing={isRefetching}
+          onRefresh={() => {
+            refetch();
+            loadHistory();
+            loadEnergyInfo();
+            loadMonthly(chartMonth.year, chartMonth.month);
+          }}
+          tintColor={C.solar}
+        />
+      }
     >
-      {/* Header */}
+      {/* ── Header ── */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Text style={styles.backBtn}>← Voltar</Text>
         </TouchableOpacity>
-        <View style={[styles.badge, { backgroundColor: isOffline ? '#ef444422' : '#10b98122' }]}>
-          <View style={[styles.badgeDot, { backgroundColor: isOffline ? '#ef4444' : '#10b981' }]} />
-          <Text style={[styles.badgeText, { color: isOffline ? '#ef4444' : '#10b981' }]}>
+        <View style={[styles.badge, { backgroundColor: isOffline ? '#ef444422' : '#22c55e22' }]}>
+          <View style={[styles.badgeDot, { backgroundColor: isOffline ? '#ef4444' : C.battery }]} />
+          <Text style={[styles.badgeText, { color: isOffline ? '#ef4444' : C.battery }]}>
             {isOffline ? 'Offline' : 'Online'}
           </Text>
         </View>
@@ -231,16 +274,21 @@ export default function DashboardScreen() {
         </View>
       )}
 
-      {/* Cards de métricas em tempo real */}
-      <Text style={styles.sectionTitle}>TEMPO REAL</Text>
+      {/* ── Tempo Real ── */}
+      <Text style={styles.sectionLabel}>TEMPO REAL</Text>
       <View style={styles.metricsGrid}>
         {[
-          { icon: '🔋', label: 'SOC', value: `${soc}%`, color: socColor },
-          { icon: '☀️', label: 'Solar', value: `${(totalSolar / 1000).toFixed(1)}kW`, color: '#f59e0b' },
-          { icon: '🏠', label: 'Consumo', value: `${(consumption / 1000).toFixed(1)}kW`, color: '#a78bfa' },
-          { icon: '🔌', label: gridStatus, value: `${(Math.abs(pToGrid) / 1000).toFixed(1)}kW`, color: gridColor },
-        ].map((m, i) => (
-          <View key={i} style={[styles.metricCard, isOffline && { opacity: 0.5 }]}>
+          { icon: '☀️', label: 'Solar', value: formatKw(totalSolar), color: C.solar },
+          { icon: '🔋', label: `SOC ${soc}%`, value: `${batPower > 50 ? '⬆' : batPower < -50 ? '⬇' : '●'} ${formatKw(batPower)}`, color: socColor },
+          { icon: '🏠', label: 'Consumo', value: formatKw(consumption), color: C.consumption },
+          {
+            icon: '🔌',
+            label: gridIsExporting ? 'Exportando' : gridIsImporting ? 'Importando' : 'Balanceado',
+            value: formatKw(pToGrid),
+            color: gridIsExporting ? C.battery : gridIsImporting ? C.grid : C.muted,
+          },
+        ].map((m) => (
+          <View key={m.label} style={[styles.metricCard, isOffline && { opacity: 0.4 }]}>
             <Text style={styles.metricIcon}>{m.icon}</Text>
             <Text style={[styles.metricValue, { color: m.color }]}>{m.value}</Text>
             <Text style={styles.metricLabel}>{m.label}</Text>
@@ -248,111 +296,137 @@ export default function DashboardScreen() {
         ))}
       </View>
 
-      {/* KPIs de Energia */}
-      <Text style={styles.sectionTitle}>ENERGIA — HOJE / TOTAL</Text>
-      {loadingEnergy ? (
-        <View style={styles.energyLoading}>
-          <ActivityIndicator color="#f59e0b" size="small" />
-        </View>
-      ) : (
-        <EnergyKPICards data={energyInfo} />
-      )}
-
-      {/* Bateria */}
-      <View style={[styles.card, isOffline && { opacity: 0.5 }]}>
+      {/* ── Bateria SOC bar ── */}
+      <View style={[styles.card, isOffline && { opacity: 0.4 }]}>
         <Text style={styles.cardLabel}>BATERIA</Text>
         <View style={styles.batteryRow}>
-          <View style={styles.batteryBarContainer}>
-            <View style={[styles.batteryFill, { width: `${soc}%`, backgroundColor: socColor }]} />
+          <View style={styles.batteryBarBg}>
+            <View style={[styles.batteryFill, { width: `${soc}%` as any, backgroundColor: socColor }]} />
           </View>
           <Text style={[styles.socText, { color: socColor }]}>{soc}%</Text>
         </View>
         <Text style={styles.cardSub}>
-          {isOffline ? 'Sem dados' : `${batDirection} — ${Math.abs(batPower)} W`}
+          {isOffline ? 'Sem dados' :
+            batPower > 50 ? `⬆ Carregando — ${batPower}W` :
+            batPower < -50 ? `⬇ Descarregando — ${Math.abs(batPower)}W` :
+            '● Repouso'}
         </Text>
       </View>
 
-      {/* Seletor de gráfico */}
-      <Text style={styles.sectionTitle}>GRÁFICO DO DIA</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chartTabsScroll}>
-        <View style={styles.chartTabs}>
-          {(Object.entries(chartConfigs) as [typeof activeChart, typeof chartConfigs.soc][]).map(([key, cfg]) => (
-            <TouchableOpacity
-              key={key}
-              style={[styles.chartTab, activeChart === key && { backgroundColor: cfg.color + '33', borderColor: cfg.color }]}
-              onPress={() => setActiveChart(key)}
-            >
-              <Text style={[styles.chartTabText, activeChart === key && { color: cfg.color }]}>
-                {key === 'soc' ? '🔋 SOC' : key === 'grid' ? '🔌 Rede' : key === 'battery' ? '⚡ Bateria' : '🏠 Consumo'}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </ScrollView>
+      {/* ── KPIs Energia ── */}
+      <Text style={styles.sectionLabel}>ENERGIA — HOJE / TOTAL</Text>
+      <EnergyKPICards data={energyInfo} loading={loadingEnergy} />
 
-      {/* Gráfico */}
+      {/* ── Gráfico do Dia ── */}
+      <Text style={styles.sectionLabel}>MONITORAMENTO DO DIA</Text>
+
+      {/* Tab power / SOC */}
+      <View style={styles.chartTabs}>
+        {([
+          { key: 'power', label: 'Potência' },
+          { key: 'soc', label: 'SOC Bateria' },
+        ] as { key: ChartTab; label: string }[]).map((t) => (
+          <TouchableOpacity
+            key={t.key}
+            style={[styles.chartTab, chartTab === t.key && styles.chartTabActive]}
+            onPress={() => setChartTab(t.key)}
+          >
+            <Text style={[styles.chartTabText, chartTab === t.key && { color: C.solar }]}>
+              {t.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
       <View style={styles.chartCard}>
-        <Text style={styles.chartTitle}>{active.label}</Text>
-        {loadingHistory ? (
-          <View style={styles.chartLoading}>
-            <ActivityIndicator color={active.color} />
-            <Text style={[styles.chartLoadingText, { color: active.color }]}>Carregando histórico...</Text>
+        {/* Peak info (power tab only) */}
+        {chartTab === 'power' && peaks && (
+          <View style={styles.peaksRow}>
+            {[
+              { label: 'Solar pico', val: peaks.maxSolar.val, time: peaks.maxSolar.time, color: C.solar },
+              { label: 'Consumo pico', val: peaks.maxCons.val, time: peaks.maxCons.time, color: C.consumption },
+              { label: 'Bateria pico', val: peaks.maxBat.val, time: peaks.maxBat.time, color: C.battery },
+            ].map((p) => (
+              <View key={p.label} style={styles.peakItem}>
+                <View style={[styles.peakDot, { backgroundColor: p.color }]} />
+                <View>
+                  <Text style={styles.peakLabel}>{p.label}</Text>
+                  <Text style={[styles.peakValue, { color: p.color }]}>
+                    {formatKw(p.val)} <Text style={styles.peakTime}>({p.time})</Text>
+                  </Text>
+                </View>
+              </View>
+            ))}
           </View>
-        ) : chartData.length > 1 ? (
+        )}
+
+        {/* Legend (power tab) */}
+        {chartTab === 'power' && (
+          <View style={styles.legend}>
+            {[
+              { label: 'Solar', color: C.solar },
+              { label: 'Rede', color: C.grid },
+              { label: 'Bateria', color: C.battery },
+              { label: 'Consumo', color: C.consumption },
+            ].map((l) => (
+              <View key={l.label} style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: l.color }]} />
+                <Text style={styles.legendText}>{l.label}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {loadingHistory ? (
+          <View style={styles.chartPlaceholder}>
+            <ActivityIndicator color={C.solar} />
+            <Text style={[styles.chartPlaceholderText, { color: C.solar }]}>Carregando histórico...</Text>
+          </View>
+        ) : !hasHistory ? (
+          <View style={styles.chartPlaceholder}>
+            <Text style={styles.chartPlaceholderText}>Sem dados históricos disponíveis</Text>
+          </View>
+        ) : chartTab === 'soc' ? (
           <LineChart
             data={{
-              labels: chartLabels,
-              datasets: [{ data: chartData.map(v => isNaN(v) ? 0 : v), color: () => active.color }],
+              labels: sparseLabels,
+              datasets: [{ data: socData, color: () => C.soc, strokeWidth: 2 }],
             }}
             width={SCREEN_WIDTH - 32}
             height={200}
-            yAxisSuffix={active.unit === '%' ? '%' : ''}
-            chartConfig={{
-              backgroundColor: '#1e293b',
-              backgroundGradientFrom: '#1e293b',
-              backgroundGradientTo: '#0f172a',
-              decimalPlaces: 1,
-              color: () => active.color,
-              labelColor: () => '#64748b',
-              propsForDots: { r: '3', strokeWidth: '2', stroke: active.color },
-              propsForBackgroundLines: { stroke: '#334155', strokeDasharray: '4' },
-            }}
+            yAxisSuffix="%"
+            chartConfig={{ ...chartConfig, color: () => C.soc }}
             bezier
-            style={{ borderRadius: 12 }}
+            style={styles.chart}
+            withDots={false}
+            withShadow={false}
           />
         ) : (
-          <View style={styles.chartLoading}>
-            <Text style={styles.chartLoadingText}>Sem dados históricos disponíveis</Text>
-          </View>
-        )}
-
-        {/* Resumo do gráfico */}
-        {chartData.length > 0 && (
-          <View style={styles.chartSummary}>
-            <View style={styles.chartSummaryItem}>
-              <Text style={styles.chartSummaryLabel}>Mínimo</Text>
-              <Text style={[styles.chartSummaryValue, { color: active.color }]}>
-                {Math.min(...chartData).toFixed(1)}{active.unit}
-              </Text>
-            </View>
-            <View style={styles.chartSummaryItem}>
-              <Text style={styles.chartSummaryLabel}>Médio</Text>
-              <Text style={[styles.chartSummaryValue, { color: active.color }]}>
-                {(chartData.reduce((a, b) => a + b, 0) / chartData.length).toFixed(1)}{active.unit}
-              </Text>
-            </View>
-            <View style={styles.chartSummaryItem}>
-              <Text style={styles.chartSummaryLabel}>Máximo</Text>
-              <Text style={[styles.chartSummaryValue, { color: active.color }]}>
-                {Math.max(...chartData).toFixed(1)}{active.unit}
-              </Text>
-            </View>
-          </View>
+          // Power: 4 lines — react-native-chart-kit supports multiple datasets
+          <LineChart
+            data={{
+              labels: sparseLabels,
+              datasets: [
+                { data: powerDatasets.solar, color: () => C.solar, strokeWidth: 2 },
+                { data: powerDatasets.grid,  color: () => C.grid,  strokeWidth: 2 },
+                { data: powerDatasets.bat,   color: () => C.battery, strokeWidth: 2 },
+                { data: powerDatasets.cons,  color: () => C.consumption, strokeWidth: 2 },
+              ],
+            }}
+            width={SCREEN_WIDTH - 32}
+            height={200}
+            yAxisSuffix="k"
+            chartConfig={chartConfig}
+            bezier
+            style={styles.chart}
+            withDots={false}
+            withShadow={false}
+          />
         )}
       </View>
 
-      {/* Gráfico Mensal */}
-      <Text style={styles.sectionTitle}>HISTÓRICO MENSAL</Text>
+      {/* ── Histórico Mensal ── */}
+      <Text style={styles.sectionLabel}>HISTÓRICO MENSAL</Text>
       <MonthlyBarChart
         data={monthlyData}
         loading={loadingMonthly}
@@ -362,12 +436,12 @@ export default function DashboardScreen() {
         onNextMonth={handleNextMonth}
       />
 
-      {/* Inversor */}
+      {/* ── Inversor ── */}
       <View style={styles.card}>
         <Text style={styles.cardLabel}>INVERSOR</Text>
-        <Text style={styles.inverterModel}>{data?.powerRatingText ?? '—'} — {data?.batteryType ?? '—'}</Text>
+        <Text style={styles.inverterModel}>{data?.powerRatingText ?? '—'}</Text>
+        <Text style={styles.cardSub}>Bateria: {data?.batteryType ?? '—'}</Text>
         <Text style={styles.cardSub}>Serial: {serialNum}</Text>
-        <Text style={styles.cardSub}>Firmware: {data?.fwCode ?? '—'}</Text>
         <Text style={styles.cardSub}>Última atualização: {data?.deviceTime ?? '—'}</Text>
       </View>
 
@@ -376,43 +450,73 @@ export default function DashboardScreen() {
   );
 }
 
+// ── Styles ─────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f172a' },
+  container: { flex: 1, backgroundColor: C.bg },
+
+  // Header
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, paddingTop: 48 },
-  backBtn: { fontSize: 14, color: '#f59e0b', fontWeight: '700' },
+  backBtn: { fontSize: 14, color: C.solar, fontWeight: '700' },
   badge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 20 },
   badgeDot: { width: 6, height: 6, borderRadius: 3 },
   badgeText: { fontSize: 11, fontWeight: '700' },
-  plantName: { fontSize: 20, fontWeight: '800', color: '#f8fafc', paddingHorizontal: 20, marginBottom: 16 },
+  plantName: { fontSize: 20, fontWeight: '800', color: C.text, paddingHorizontal: 20, marginBottom: 4 },
+
+  // Offline
   offlineBanner: { backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440', margin: 16, borderRadius: 12, padding: 12 },
   offlineTitle: { fontSize: 13, fontWeight: '700', color: '#ef4444' },
-  offlineSub: { fontSize: 11, color: '#94a3b8', marginTop: 2 },
-  sectionTitle: { fontSize: 11, color: '#475569', fontWeight: '700', letterSpacing: 1, paddingHorizontal: 20, marginBottom: 10, marginTop: 4 },
+  offlineSub: { fontSize: 11, color: C.sub, marginTop: 2 },
+
+  // Section
+  sectionLabel: { fontSize: 11, color: C.muted, fontWeight: '700', letterSpacing: 1, paddingHorizontal: 20, marginBottom: 10, marginTop: 16 },
+
+  // Metrics grid
   metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingHorizontal: 16, marginBottom: 12 },
-  metricCard: { backgroundColor: '#1e293b', borderRadius: 14, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: '#334155', width: '47%' },
+  metricCard: { backgroundColor: C.card, borderRadius: 14, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: C.border, width: '47%' },
   metricIcon: { fontSize: 24, marginBottom: 6 },
-  metricValue: { fontSize: 22, fontWeight: '800' },
-  metricLabel: { fontSize: 11, color: '#64748b', marginTop: 3, fontWeight: '600' },
-  card: { backgroundColor: '#1e293b', borderRadius: 16, padding: 16, marginHorizontal: 16, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
-  cardLabel: { fontSize: 11, color: '#64748b', fontWeight: '700', letterSpacing: 1, marginBottom: 10 },
-  cardSub: { fontSize: 12, color: '#64748b', marginTop: 4 },
+  metricValue: { fontSize: 18, fontWeight: '800' },
+  metricLabel: { fontSize: 11, color: C.muted, marginTop: 3, fontWeight: '600' },
+
+  // Card
+  card: { backgroundColor: C.card, borderRadius: 16, padding: 16, marginHorizontal: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border },
+  cardLabel: { fontSize: 11, color: C.muted, fontWeight: '700', letterSpacing: 1, marginBottom: 10 },
+  cardSub: { fontSize: 12, color: C.muted, marginTop: 4 },
+
+  // Battery bar
   batteryRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  batteryBarContainer: { flex: 1, height: 20, backgroundColor: '#0f172a', borderRadius: 10, overflow: 'hidden' },
-  batteryFill: { height: '100%', borderRadius: 10 },
-  socText: { fontSize: 22, fontWeight: '800', minWidth: 52, textAlign: 'right' },
-  chartTabsScroll: { marginBottom: 10 },
-  chartTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 16 },
-  chartTab: { paddingVertical: 7, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155' },
-  chartTabText: { fontSize: 12, color: '#64748b', fontWeight: '600' },
-  chartCard: { backgroundColor: '#1e293b', borderRadius: 16, padding: 16, marginHorizontal: 16, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
-  chartTitle: { fontSize: 13, color: '#94a3b8', fontWeight: '700', marginBottom: 14 },
-  chartLoading: { height: 200, justifyContent: 'center', alignItems: 'center', gap: 10 },
-  chartLoadingText: { fontSize: 13, color: '#475569' },
-  chartSummary: { flexDirection: 'row', justifyContent: 'space-around', marginTop: 14, paddingTop: 14, borderTopWidth: 1, borderTopColor: '#334155' },
-  chartSummaryItem: { alignItems: 'center' },
-  chartSummaryLabel: { fontSize: 10, color: '#475569', fontWeight: '600' },
-  chartSummaryValue: { fontSize: 16, fontWeight: '800', marginTop: 3 },
-  inverterModel: { fontSize: 16, fontWeight: '700', color: '#f8fafc' },
-  footer: { textAlign: 'center', color: '#334155', fontSize: 11, padding: 20 },
-  energyLoading: { height: 80, justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
+  batteryBarBg: { flex: 1, height: 18, backgroundColor: C.bg, borderRadius: 9, overflow: 'hidden' },
+  batteryFill: { height: '100%', borderRadius: 9 },
+  socText: { fontSize: 20, fontWeight: '800', minWidth: 50, textAlign: 'right' },
+
+  // Chart tabs
+  chartTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 10 },
+  chartTab: { paddingVertical: 7, paddingHorizontal: 16, borderRadius: 20, backgroundColor: C.card, borderWidth: 1, borderColor: C.border },
+  chartTabActive: { backgroundColor: C.solar + '22', borderColor: C.solar },
+  chartTabText: { fontSize: 12, color: C.muted, fontWeight: '600' },
+
+  // Chart card
+  chartCard: { backgroundColor: C.card, borderRadius: 16, paddingTop: 16, paddingBottom: 12, marginHorizontal: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border },
+  chart: { borderRadius: 12 },
+  chartPlaceholder: { height: 200, justifyContent: 'center', alignItems: 'center', gap: 10 },
+  chartPlaceholderText: { fontSize: 13, color: C.muted },
+
+  // Peaks
+  peaksRow: { gap: 8, paddingHorizontal: 16, marginBottom: 12 },
+  peakItem: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  peakDot: { width: 8, height: 8, borderRadius: 4, marginTop: 2 },
+  peakLabel: { fontSize: 10, color: C.muted, fontWeight: '600' },
+  peakValue: { fontSize: 13, fontWeight: '700' },
+  peakTime: { fontSize: 10, color: C.muted, fontWeight: '400' },
+
+  // Legend
+  legend: { flexDirection: 'row', gap: 14, paddingHorizontal: 16, marginBottom: 12 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontSize: 11, color: C.muted },
+
+  // Inversor
+  inverterModel: { fontSize: 15, fontWeight: '700', color: C.text, marginBottom: 4 },
+
+  // Footer
+  footer: { textAlign: 'center', color: C.border, fontSize: 11, padding: 20 },
 });
