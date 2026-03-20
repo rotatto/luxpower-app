@@ -20,6 +20,19 @@ async function deyeInvoke(endpoint: string, body: object = {}) {
   return data;
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Extract an array from a payload that may be a direct array, { data: [] }, or { rows: [] }. */
+function extractArray(payload: unknown): any[] {
+  if (Array.isArray(payload)) return payload;
+  if (payload && typeof payload === 'object') {
+    const p = payload as Record<string, unknown>;
+    if (Array.isArray(p.data)) return p.data as any[];
+    if (Array.isArray(p.rows)) return p.rows as any[];
+  }
+  return [];
+}
+
 // ─── Session Management ───────────────────────────────────────────────────────
 
 function isSessionExpiredError(e: unknown): boolean {
@@ -152,7 +165,7 @@ class LuxPowerService {
         dateText,
         parallel: false,
       });
-      return data;
+      return extractArray(data.data);
     });
   }
 
@@ -166,7 +179,7 @@ class LuxPowerService {
   async getMonthly(serialNum: string, year: number, month: number) {
     return withSessionRetry(async (sessionId) => {
       const data = await luxInvoke({ action: 'monthly', sessionId, serialNum, year, month, parallel: false });
-      const raw: any[] = data.data ?? [];
+      const raw = extractArray(data.data);
       return raw.map((p: any) => ({
         day: Number(p.day ?? 0),
         ePv1Day: Number(p.ePv1Day ?? 0) / 10,
