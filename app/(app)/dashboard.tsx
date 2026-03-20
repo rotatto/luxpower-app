@@ -93,8 +93,7 @@ export default function DashboardScreen() {
   async function loadHistory() {
     setLoadingHistory(true);
     try {
-      const result = await luxPowerService.getHistory(serialNum);
-      const raw = result?.data;
+      const raw = await luxPowerService.getHistory(serialNum);
       if (Array.isArray(raw) && raw.length > 0) {
         setHistory(parseHistory(raw));
       } else {
