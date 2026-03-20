@@ -17,17 +17,17 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
 
   login: async (account, password) => {
+    // Verifies the edge function is reachable; actual LuxPower credentials live server-side.
     const data = await luxPowerService.login(account, password);
 
-    // Salva credenciais para reautenticar automaticamente
     await SecureStore.setItemAsync('account', account);
     await SecureStore.setItemAsync('password', password);
     await SecureStore.setItemAsync('userId', String(data.user ?? account));
-    await SecureStore.setItemAsync('username', data.user ?? account);
+    await SecureStore.setItemAsync('username', String(data.user ?? account));
 
     set({
-      userName: data.user,
-      userId: String(data.user),
+      userName: String(data.user ?? account),
+      userId: String(data.user ?? account),
       isAuthenticated: true,
     });
   },
@@ -42,23 +42,15 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   restoreSession: async () => {
     const account = await SecureStore.getItemAsync('account');
-    const password = await SecureStore.getItemAsync('password');
     const userName = await SecureStore.getItemAsync('username');
     const userId = await SecureStore.getItemAsync('userId');
 
     console.log('[Auth] Restaurando sessão, userId:', userId);
 
-    if (account && password) {
-      try {
-        // Refaz o login no proxy para renovar o cookie do servidor
-        await luxPowerService.login(account, password);
-        console.log('[Auth] Reautenticado com sucesso');
-        set({ userName, userId, isAuthenticated: true });
-        return true;
-      } catch (e) {
-        console.warn('[Auth] Falha ao reautenticar:', e);
-        return false;
-      }
+    if (account && userId) {
+      // Session tokens live in the edge function — no re-auth needed here.
+      set({ userName, userId, isAuthenticated: true });
+      return true;
     }
     return false;
   },
