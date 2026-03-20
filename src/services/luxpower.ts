@@ -156,6 +156,20 @@ class LuxPowerService {
     });
   }
 
+  async getEnergyInfo(serialNum: string) {
+    return withSessionRetry(async (sessionId) => {
+      const data = await luxInvoke({ action: 'energyInfo', sessionId, serialNum, parallel: false });
+      return data.data ?? {};
+    });
+  }
+
+  async getMonthly(serialNum: string, year: number, month: number) {
+    return withSessionRetry(async (sessionId) => {
+      const data = await luxInvoke({ action: 'monthly', sessionId, serialNum, year, month, parallel: false });
+      return data.data ?? [];
+    });
+  }
+
   // ─── Deye ──────────────────────────────────────────────────────────────────
 
   async getDeyeStations() {
