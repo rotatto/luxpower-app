@@ -5,20 +5,22 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { LineChart } from 'react-native-chart-kit';
+import { format, subDays, addDays } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
 import { useRealtime } from '../../src/hooks/useRealtime';
 import { luxPowerService } from '../../src/services/luxpower';
 import { EnergyKPICards } from '../../src/components/EnergyKPICards';
 import { MonthlyBarChart } from '../../src/components/MonthlyBarChart';
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
+const SW = Dimensions.get('window').width;
 
-// ── Design tokens (matching solar-shine-dash) ─────────────────────────────────
+// ── Design tokens idênticos ao solar-shine-dash ───────────────────────────────
 const C = {
-  solar: '#bad700',
-  grid: 'hsl(0, 85%, 55%)',      // red
-  battery: 'hsl(142, 76%, 45%)', // green
-  consumption: 'hsl(280, 65%, 55%)', // purple
-  soc: 'hsl(45, 93%, 47%)',      // amber
+  solar: 'hsl(36, 100%, 50%)',    // laranja-solar (igual solar-shine-dash)
+  grid: 'hsl(0, 85%, 55%)',       // vermelho
+  battery: 'hsl(142, 76%, 45%)',  // verde
+  consumption: 'hsl(280, 65%, 55%)', // roxo
+  soc: 'hsl(45, 93%, 47%)',       // âmbar
   bg: '#0f172a',
   card: '#1e293b',
   border: '#334155',
@@ -28,80 +30,101 @@ const C = {
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface ChartPoint {
-  time: string;
+interface HistoryPoint {
+  timeLabel: string;
+  solarPv: number;
+  gridPower: number;
+  consumption: number;
   soc: number;
-  grid: number;       // W  (gridPower from API)
-  battery: number;    // W  (batteryDischarging from API)
-  consumption: number;// W  (consumption from API)
-  solar: number;      // W  (solarPv from API)
 }
 
-type ChartTab = 'power' | 'soc';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function toNum(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Extrai HH:MM de "2024-03-20 14:30:00" ou timestamps similares */
+function extractTimeLabel(t: string): string {
+  if (!t) return '';
+  const spaceIdx = t.indexOf(' ');
+  if (spaceIdx !== -1) return t.substring(spaceIdx + 1, spaceIdx + 6);
+  return t.slice(-5);
 }
 
 function safeArr(arr: number[]): number[] {
   return arr.map((v) => (isNaN(v) || !isFinite(v) ? 0 : v));
 }
 
-function kw(w: number) {
-  return Math.abs(w) / 1000;
+function formatW(w: number): string {
+  const abs = Math.abs(w);
+  if (abs >= 1000) return `${(w / 1000).toFixed(2)}kW`;
+  return `${Math.round(w)}W`;
 }
 
-function formatKw(w: number) {
-  return `${(Math.abs(w) / 1000).toFixed(1)}kW`;
+function dateStr(d: Date): string {
+  return format(d, 'yyyy-MM-dd');
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// ── Dashboard ─────────────────────────────────────────────────────────────────
 export default function DashboardScreen() {
   const { serialNum, plantName } = useLocalSearchParams<{ serialNum: string; plantName: string }>();
-  const { data, isLoading, refetch, isRefetching } = useRealtime(serialNum);
+  const { data: raw, isRefetching, refetch } = useRealtime(serialNum);
 
-  const [history, setHistory] = useState<ChartPoint[]>([]);
+  // ── History ──────────────────────────────────────────────────────────────
+  const [historyDate, setHistoryDate] = useState(new Date());
+  const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
-  const [chartTab, setChartTab] = useState<ChartTab>('power');
+  const [historyExpanded, setHistoryExpanded] = useState(false);
 
+  // ── Energy Info (KPIs) ────────────────────────────────────────────────────
   const [energyInfo, setEnergyInfo] = useState<Record<string, string>>({});
   const [loadingEnergy, setLoadingEnergy] = useState(true);
 
+  // ── Monthly ───────────────────────────────────────────────────────────────
   const now = new Date();
-  const [chartMonth, setChartMonth] = useState({
-    year: now.getFullYear(),
-    month: now.getMonth() + 1,
-  });
+  const [chartMonth, setChartMonth] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 });
   const [monthlyData, setMonthlyData] = useState<any[]>([]);
   const [loadingMonthly, setLoadingMonthly] = useState(true);
 
-  // ── Data loading ──────────────────────────────────────────────────────────
+  // ── Line visibility ───────────────────────────────────────────────────────
+  const [vis, setVis] = useState({ solar: true, grid: true, consumption: true, soc: true });
+
+  // ── Initial load ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!serialNum) return;
+    loadEnergyInfo();
+  }, [serialNum]);
 
   useEffect(() => {
     if (!serialNum) return;
-    loadHistory();
-    loadEnergyInfo();
-  }, [serialNum]);
+    loadHistory(historyDate);
+  }, [serialNum, historyDate]);
 
   useEffect(() => {
     if (!serialNum) return;
     loadMonthly(chartMonth.year, chartMonth.month);
   }, [serialNum, chartMonth]);
 
-  async function loadHistory() {
+  // ── Loaders ───────────────────────────────────────────────────────────────
+  async function loadHistory(date: Date) {
     setLoadingHistory(true);
     try {
-      const raw = await luxPowerService.getHistory(serialNum);
-      if (Array.isArray(raw) && raw.length > 0) {
-        setHistory(parseHistory(raw));
-      } else {
-        setHistory([]);
-      }
+      const pts = await luxPowerService.getHistory(serialNum, dateStr(date));
+      setHistoryPoints(
+        Array.isArray(pts)
+          ? pts.map((p: any) => ({
+              // Campos exatos da API LuxPower (mesmos do solar-shine-dash)
+              timeLabel: extractTimeLabel(String(p.time ?? '')),
+              solarPv: toNum(p.solarPv),
+              gridPower: toNum(p.gridPower),
+              consumption: toNum(p.consumption),
+              soc: Math.max(0, Math.min(100, toNum(p.soc))),
+            }))
+          : []
+      );
     } catch (e) {
       console.error('[Dashboard] Erro histórico:', e);
-      setHistory([]);
+      setHistoryPoints([]);
     } finally {
       setLoadingHistory(false);
     }
@@ -110,8 +133,8 @@ export default function DashboardScreen() {
   async function loadEnergyInfo() {
     setLoadingEnergy(true);
     try {
-      const result = await luxPowerService.getEnergyInfo(serialNum);
-      setEnergyInfo(result ?? {});
+      const info = await luxPowerService.getEnergyInfo(serialNum);
+      setEnergyInfo(info ?? {});
     } catch (e) {
       console.error('[Dashboard] Erro energyInfo:', e);
     } finally {
@@ -122,8 +145,8 @@ export default function DashboardScreen() {
   async function loadMonthly(year: number, month: number) {
     setLoadingMonthly(true);
     try {
-      const result = await luxPowerService.getMonthly(serialNum, year, month);
-      setMonthlyData(Array.isArray(result) ? result : []);
+      const data = await luxPowerService.getMonthly(serialNum, year, month);
+      setMonthlyData(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error('[Dashboard] Erro monthly:', e);
       setMonthlyData([]);
@@ -132,390 +155,395 @@ export default function DashboardScreen() {
     }
   }
 
-  // ── History parser ─────────────────────────────────────────────────────────
-  // LuxPower history fields: time, solarPv, gridPower, consumption, soc, batteryDischarging
-  function parseHistory(raw: any[]): ChartPoint[] {
-    return raw.map((item: any) => ({
-      time: String(item.time ?? ''),
-      soc: toNum(item.soc),
-      grid: toNum(item.gridPower),
-      battery: toNum(item.batteryDischarging),
-      consumption: toNum(item.consumption),
-      solar: toNum(item.solarPv),
-    }));
+  // ── Month navigation ──────────────────────────────────────────────────────
+  function prevMonth() {
+    setChartMonth((p) =>
+      p.month === 1 ? { year: p.year - 1, month: 12 } : { year: p.year, month: p.month - 1 }
+    );
   }
-
-  // ── Month navigation ───────────────────────────────────────────────────────
-  function handlePrevMonth() {
-    setChartMonth((prev) =>
-      prev.month === 1
-        ? { year: prev.year - 1, month: 12 }
-        : { year: prev.year, month: prev.month - 1 }
+  function nextMonth() {
+    const today = new Date();
+    if (chartMonth.year === today.getFullYear() && chartMonth.month === today.getMonth() + 1) return;
+    setChartMonth((p) =>
+      p.month === 12 ? { year: p.year + 1, month: 1 } : { year: p.year, month: p.month + 1 }
     );
   }
 
-  function handleNextMonth() {
-    setChartMonth((prev) => {
-      const today = new Date();
-      if (prev.year === today.getFullYear() && prev.month === today.getMonth() + 1) return prev;
-      return prev.month === 12
-        ? { year: prev.year + 1, month: 1 }
-        : { year: prev.year, month: prev.month + 1 };
-    });
-  }
+  // ── Realtime values (mesma lógica do solar-shine-dash fetchLuxRealtime) ───
+  const isOnline = raw?.lost === false;
+  const soc     = toNum(raw?.soc);
+  const ppv     = toNum(raw?.ppv1) + toNum(raw?.ppv2) + toNum(raw?.ppv3);
+  const batPwr  = toNum(raw?.batPower);
+  const consPwr = toNum(raw?.consumptionPower);
+  const pToGrid = toNum(raw?.pToGrid);
+  const pToUser = toNum(raw?.pToUser);
+  // rawGridPower: positivo = importando, negativo = exportando (igual solar-shine-dash)
+  const rawGrid = pToUser - pToGrid;
 
-  // ── Realtime values ────────────────────────────────────────────────────────
-  const isOffline = data?.lost === true;
-  const soc = toNum(data?.soc);
-  const totalSolar = toNum(data?.ppv1) + toNum(data?.ppv2) + toNum(data?.ppv3);
-  const consumption = toNum(data?.consumptionPower);
-  const batPower = toNum(data?.batPower);
-  const pToGrid = toNum(data?.pToGrid);
+  const socColor = soc > 60 ? C.battery : soc > 30 ? C.soc : C.grid;
+  const isToday = dateStr(historyDate) === dateStr(new Date());
 
-  const socColor = isOffline ? C.muted : soc > 60 ? C.battery : soc > 30 ? C.soc : C.grid;
-  const gridIsExporting = pToGrid > 50;
-  const gridIsImporting = pToGrid < -50;
-
-  // ── Chart data ─────────────────────────────────────────────────────────────
-  // Reduce to ≤ 48 points for performance
+  // ── History chart data ────────────────────────────────────────────────────
+  // Reduz para ≤ 60 pontos para performance
   const reduced = useMemo(() => {
-    if (history.length <= 48) return history;
-    const step = Math.ceil(history.length / 48);
-    return history.filter((_, i) => i % step === 0);
-  }, [history]);
+    if (historyPoints.length <= 60) return historyPoints;
+    const step = Math.ceil(historyPoints.length / 60);
+    return historyPoints.filter((_, i) => i % step === 0);
+  }, [historyPoints]);
 
-  const labels = useMemo(
-    () => reduced.map((p) => p.time.substring(0, 5)),
+  const sparseLabels = useMemo(
+    () => reduced.map((p, i) => (i % 8 === 0 ? p.timeLabel : '')),
     [reduced]
   );
 
-  // Show every 6th label to avoid crowding
-  const sparseLabels = labels.map((l, i) => (i % 6 === 0 ? l : ''));
-
-  // Power chart: solar, grid, battery, consumption — all in kW
-  const powerDatasets = useMemo(() => {
-    const solar = safeArr(reduced.map((p) => kw(p.solar)));
-    const grid  = safeArr(reduced.map((p) => kw(p.grid)));
-    const bat   = safeArr(reduced.map((p) => kw(p.battery)));
-    const cons  = safeArr(reduced.map((p) => kw(p.consumption)));
-    return { solar, grid, bat, cons };
-  }, [reduced]);
-
-  // SOC chart
-  const socData = useMemo(
-    () => safeArr(reduced.map((p) => Math.max(0, Math.min(100, p.soc)))),
-    [reduced]
-  );
-
-  // Peak values for power lines
+  // Peaks (igual solar-shine-dash)
   const peaks = useMemo(() => {
-    if (!history.length) return null;
-    let maxSolar = { val: 0, time: '--' };
-    let maxCons  = { val: 0, time: '--' };
-    let maxBat   = { val: 0, time: '--' };
-    history.forEach((p) => {
-      if (p.solar > maxSolar.val) maxSolar = { val: p.solar, time: p.time.substring(0, 5) };
-      if (p.consumption > maxCons.val) maxCons = { val: p.consumption, time: p.time.substring(0, 5) };
-      if (p.battery > maxBat.val) maxBat = { val: p.battery, time: p.time.substring(0, 5) };
+    let solar = { value: 0, time: '--:--' };
+    let grid  = { value: 0, time: '--:--' };
+    let cons  = { value: 0, time: '--:--' };
+    historyPoints.forEach((p) => {
+      if (Math.abs(p.solarPv)   > Math.abs(solar.value)) solar = { value: p.solarPv,   time: p.timeLabel };
+      if (Math.abs(p.gridPower) > Math.abs(grid.value))  grid  = { value: p.gridPower, time: p.timeLabel };
+      if (Math.abs(p.consumption) > Math.abs(cons.value)) cons = { value: p.consumption, time: p.timeLabel };
     });
-    return { maxSolar, maxCons, maxBat };
-  }, [history]);
+    return { solar, grid, cons };
+  }, [historyPoints]);
+
+  // Chart datasets
+  const chartDatasets = useMemo(() => {
+    const solar = safeArr(reduced.map((p) => p.solarPv / 1000));
+    const grid  = safeArr(reduced.map((p) => p.gridPower / 1000));
+    const cons  = safeArr(reduced.map((p) => p.consumption / 1000));
+    const socD  = safeArr(reduced.map((p) => p.soc));
+    return { solar, grid, cons, socD };
+  }, [reduced]);
 
   const hasHistory = reduced.length > 1;
 
-  const chartConfig = {
-    backgroundColor: C.card,
-    backgroundGradientFrom: C.card,
-    backgroundGradientTo: C.bg,
-    decimalPlaces: 1,
-    color: (opacity = 1) => `rgba(186, 215, 0, ${opacity})`,
-    labelColor: () => C.muted,
-    propsForDots: { r: '0' },
-    propsForBackgroundLines: { stroke: C.border, strokeDasharray: '4' },
-  };
+  // ── Monthly totals ────────────────────────────────────────────────────────
+  const monthlyTotal = useMemo(
+    () => monthlyData.reduce((s, p) => s + ((p.ePv1Day ?? 0) + (p.ePv2Day ?? 0) + (p.ePv3Day ?? 0)), 0),
+    [monthlyData]
+  );
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Refresh all ──────────────────────────────────────────────────────────
+  function refreshAll() {
+    refetch();
+    loadEnergyInfo();
+    loadHistory(historyDate);
+    loadMonthly(chartMonth.year, chartMonth.month);
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <ScrollView
-      style={styles.container}
-      refreshControl={
-        <RefreshControl
-          refreshing={isRefetching}
-          onRefresh={() => {
-            refetch();
-            loadHistory();
-            loadEnergyInfo();
-            loadMonthly(chartMonth.year, chartMonth.month);
-          }}
-          tintColor={C.solar}
-        />
-      }
+      style={styles.root}
+      refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={refreshAll} tintColor={C.solar} />}
     >
-      {/* ── Header ── */}
+      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={() => router.back()} hitSlop={12}>
           <Text style={styles.backBtn}>← Voltar</Text>
         </TouchableOpacity>
-        <View style={[styles.badge, { backgroundColor: isOffline ? '#ef444422' : '#22c55e22' }]}>
-          <View style={[styles.badgeDot, { backgroundColor: isOffline ? '#ef4444' : C.battery }]} />
-          <Text style={[styles.badgeText, { color: isOffline ? '#ef4444' : C.battery }]}>
-            {isOffline ? 'Offline' : 'Online'}
+        <View style={[styles.badge, { backgroundColor: isOnline ? '#22c55e22' : '#ef444422' }]}>
+          <View style={[styles.badgeDot, { backgroundColor: isOnline ? C.battery : '#ef4444' }]} />
+          <Text style={[styles.badgeText, { color: isOnline ? C.battery : '#ef4444' }]}>
+            {isOnline ? 'Online' : 'Offline'}
           </Text>
         </View>
       </View>
+      <Text style={styles.plantName} numberOfLines={2}>{plantName ?? 'Dashboard'}</Text>
+      <Text style={styles.plantSub}>LuxPower · {raw?.powerRatingText ?? '—'}</Text>
 
-      <Text style={styles.plantName} numberOfLines={2}>{plantName}</Text>
+      {/* ══ TEMPO REAL ══════════════════════════════════════════════════════ */}
+      <Text style={styles.section}>TEMPO REAL</Text>
 
-      {isOffline && (
-        <View style={styles.offlineBanner}>
-          <Text style={styles.offlineTitle}>⚠️ Inversor offline</Text>
-          <Text style={styles.offlineSub}>Última comunicação: {data?.deviceTime ?? '—'}</Text>
+      <View style={styles.grid4}>
+        {[
+          { label: 'Solar', val: formatW(ppv),    color: C.solar,       icon: '☀️' },
+          { label: isOnline && batPwr > 50 ? 'Carregando' : batPwr < -50 ? 'Descarregando' : 'Bateria', val: formatW(batPwr), color: socColor, icon: '🔋' },
+          { label: 'Consumo', val: formatW(consPwr), color: C.consumption, icon: '🏠' },
+          { label: rawGrid > 50 ? 'Importando' : rawGrid < -50 ? 'Exportando' : 'Grid', val: formatW(Math.abs(rawGrid)), color: rawGrid > 50 ? '#ef4444' : rawGrid < -50 ? C.battery : C.muted, icon: '⚡' },
+        ].map((m) => (
+          <View key={m.label} style={[styles.metCard, !isOnline && { opacity: 0.35 }]}>
+            <Text style={styles.metIcon}>{m.icon}</Text>
+            <Text style={[styles.metVal, { color: m.color }]}>{m.val}</Text>
+            <Text style={styles.metLabel}>{m.label}</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* Bateria SOC */}
+      <View style={[styles.card, !isOnline && { opacity: 0.35 }]}>
+        <View style={styles.socRow}>
+          <View style={styles.socBarBg}>
+            <View style={[styles.socFill, { width: `${soc}%` as any, backgroundColor: socColor }]} />
+          </View>
+          <Text style={[styles.socPct, { color: socColor }]}>{soc}%</Text>
+        </View>
+        <Text style={styles.cardSub}>{raw?.batteryType ?? '—'} · SOC da bateria</Text>
+      </View>
+
+      {/* ══ KPI ENERGIA ═════════════════════════════════════════════════════ */}
+      <Text style={styles.section}>ENERGIA — HOJE / TOTAL</Text>
+      <EnergyKPICards data={energyInfo} loading={loadingEnergy} />
+
+      {/* ══ HISTÓRICO DO DIA ════════════════════════════════════════════════ */}
+      <Text style={styles.section}>HISTÓRICO DO DIA</Text>
+
+      {!historyExpanded ? (
+        /* Card colapsado — igual solar-shine-dash */
+        <TouchableOpacity style={styles.card} onPress={() => setHistoryExpanded(true)}>
+          <View style={styles.row}>
+            <View style={styles.activityCircle}>
+              <Text style={{ fontSize: 18 }}>📈</Text>
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.cardTitle}>Histórico do Dia</Text>
+              <Text style={styles.cardSub}>
+                Acompanhe o <Text style={{ color: C.solar }}>comportamento da energia</Text> ao longo das últimas 24h.
+              </Text>
+            </View>
+          </View>
+          <Text style={[styles.cardSub, { color: C.solar, marginTop: 12 }]}>
+            Visualizar fluxo detalhado →
+          </Text>
+        </TouchableOpacity>
+      ) : (
+        /* Card expandido */
+        <View style={styles.card}>
+          {/* Header com data e fechar */}
+          <View style={styles.rowBetween}>
+            <View>
+              <Text style={styles.cardTitle}>Monitoramento do Dia</Text>
+              <Text style={styles.cardSub}>
+                {isToday ? 'Atualização a cada 5 minutos' : 'Dados históricos'}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => setHistoryExpanded(false)}>
+              <Text style={{ color: C.muted, fontSize: 22, lineHeight: 22 }}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Navegação de data */}
+          <View style={[styles.row, { justifyContent: 'center', marginVertical: 12, gap: 16 }]}>
+            <TouchableOpacity
+              style={styles.dateBtn}
+              onPress={() => setHistoryDate((d) => subDays(d, 1))}
+            >
+              <Text style={styles.dateBtnText}>‹</Text>
+            </TouchableOpacity>
+            <Text style={styles.dateLabel}>
+              {format(historyDate, "dd/MM/yyyy", { locale: ptBR })}
+            </Text>
+            <TouchableOpacity
+              style={styles.dateBtn}
+              onPress={() => !isToday && setHistoryDate((d) => addDays(d, 1))}
+            >
+              <Text style={[styles.dateBtnText, isToday && { color: C.border }]}>›</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Peaks — igual solar-shine-dash */}
+          {hasHistory && (
+            <View style={styles.peaksRow}>
+              {[
+                { label: 'Solar pico',  val: peaks.solar.value, time: peaks.solar.time, color: C.solar },
+                { label: 'Rede pico',   val: peaks.grid.value,  time: peaks.grid.time,  color: C.grid },
+                { label: 'Consumo pico', val: peaks.cons.value, time: peaks.cons.time,  color: C.consumption },
+              ].map((p) => (
+                <View key={p.label} style={styles.peakItem}>
+                  <View style={[styles.peakDot, { backgroundColor: p.color }]} />
+                  <View>
+                    <Text style={styles.peakLabel}>{p.label}</Text>
+                    <Text style={[styles.peakVal, { color: p.color }]}>
+                      {formatW(p.val)}{' '}
+                      <Text style={styles.peakTime}>({p.time})</Text>
+                    </Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Toggle linhas (igual solar-shine-dash) */}
+          <View style={styles.legendRow}>
+            {([
+              { key: 'solar' as const,       label: 'Solar',   color: C.solar },
+              { key: 'grid' as const,        label: 'Rede',    color: C.grid },
+              { key: 'consumption' as const, label: 'Consumo', color: C.consumption },
+              { key: 'soc' as const,         label: 'SOC',     color: C.soc },
+            ] as const).map((l) => (
+              <TouchableOpacity
+                key={l.key}
+                style={[styles.legendChip, !vis[l.key] && { opacity: 0.35 }]}
+                onPress={() => setVis((v) => ({ ...v, [l.key]: !v[l.key] }))}
+              >
+                <View style={[styles.legendDot, { backgroundColor: l.color }]} />
+                <Text style={styles.legendText}>{l.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* Gráfico */}
+          {loadingHistory ? (
+            <View style={styles.chartPlaceholder}>
+              <ActivityIndicator color={C.solar} />
+              <Text style={[styles.cardSub, { marginTop: 6 }]}>Carregando dados do dia...</Text>
+            </View>
+          ) : !hasHistory ? (
+            <View style={styles.chartPlaceholder}>
+              <Text style={styles.cardSub}>Sem dados para esta data</Text>
+            </View>
+          ) : (
+            (() => {
+              // Constrói datasets apenas com as linhas visíveis
+              const datasets: { data: number[]; color: () => string; strokeWidth: number }[] = [];
+              if (vis.solar)       datasets.push({ data: chartDatasets.solar, color: () => C.solar,       strokeWidth: 2 });
+              if (vis.grid)        datasets.push({ data: chartDatasets.grid,  color: () => C.grid,        strokeWidth: 2 });
+              if (vis.consumption) datasets.push({ data: chartDatasets.cons,  color: () => C.consumption, strokeWidth: 2 });
+              // SOC em escala separada: normaliza para mesma faixa de kW
+              if (vis.soc) {
+                const maxPwr = Math.max(
+                  ...chartDatasets.solar, ...chartDatasets.grid, ...chartDatasets.cons, 0.1
+                );
+                datasets.push({
+                  data: safeArr(chartDatasets.socD.map((v) => (v / 100) * maxPwr)),
+                  color: () => C.soc,
+                  strokeWidth: 2,
+                });
+              }
+              if (datasets.length === 0) {
+                datasets.push({ data: [0], color: () => C.muted, strokeWidth: 1 });
+              }
+              return (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <LineChart
+                    data={{ labels: sparseLabels, datasets }}
+                    width={Math.max(SW - 32, reduced.length * 8)}
+                    height={220}
+                    yAxisSuffix="k"
+                    chartConfig={{
+                      backgroundColor: C.card,
+                      backgroundGradientFrom: C.card,
+                      backgroundGradientTo: C.bg,
+                      decimalPlaces: 1,
+                      color: () => C.solar,
+                      labelColor: () => C.muted,
+                      propsForDots: { r: '0' },
+                      propsForBackgroundLines: { stroke: C.border, strokeDasharray: '4' },
+                    }}
+                    bezier
+                    style={{ borderRadius: 12 }}
+                    withDots={false}
+                    withShadow={false}
+                  />
+                </ScrollView>
+              );
+            })()
+          )}
         </View>
       )}
 
-      {/* ── Tempo Real ── */}
-      <Text style={styles.sectionLabel}>TEMPO REAL</Text>
-      <View style={styles.metricsGrid}>
-        {[
-          { icon: '☀️', label: 'Solar', value: formatKw(totalSolar), color: C.solar },
-          { icon: '🔋', label: `SOC ${soc}%`, value: `${batPower > 50 ? '⬆' : batPower < -50 ? '⬇' : '●'} ${formatKw(batPower)}`, color: socColor },
-          { icon: '🏠', label: 'Consumo', value: formatKw(consumption), color: C.consumption },
-          {
-            icon: '🔌',
-            label: gridIsExporting ? 'Exportando' : gridIsImporting ? 'Importando' : 'Balanceado',
-            value: formatKw(pToGrid),
-            color: gridIsExporting ? C.battery : gridIsImporting ? C.grid : C.muted,
-          },
-        ].map((m) => (
-          <View key={m.label} style={[styles.metricCard, isOffline && { opacity: 0.4 }]}>
-            <Text style={styles.metricIcon}>{m.icon}</Text>
-            <Text style={[styles.metricValue, { color: m.color }]}>{m.value}</Text>
-            <Text style={styles.metricLabel}>{m.label}</Text>
-          </View>
-        ))}
-      </View>
-
-      {/* ── Bateria SOC bar ── */}
-      <View style={[styles.card, isOffline && { opacity: 0.4 }]}>
-        <Text style={styles.cardLabel}>BATERIA</Text>
-        <View style={styles.batteryRow}>
-          <View style={styles.batteryBarBg}>
-            <View style={[styles.batteryFill, { width: `${soc}%` as any, backgroundColor: socColor }]} />
-          </View>
-          <Text style={[styles.socText, { color: socColor }]}>{soc}%</Text>
-        </View>
-        <Text style={styles.cardSub}>
-          {isOffline ? 'Sem dados' :
-            batPower > 50 ? `⬆ Carregando — ${batPower}W` :
-            batPower < -50 ? `⬇ Descarregando — ${Math.abs(batPower)}W` :
-            '● Repouso'}
-        </Text>
-      </View>
-
-      {/* ── KPIs Energia ── */}
-      <Text style={styles.sectionLabel}>ENERGIA — HOJE / TOTAL</Text>
-      <EnergyKPICards data={energyInfo} loading={loadingEnergy} />
-
-      {/* ── Gráfico do Dia ── */}
-      <Text style={styles.sectionLabel}>MONITORAMENTO DO DIA</Text>
-
-      {/* Tab power / SOC */}
-      <View style={styles.chartTabs}>
-        {([
-          { key: 'power', label: 'Potência' },
-          { key: 'soc', label: 'SOC Bateria' },
-        ] as { key: ChartTab; label: string }[]).map((t) => (
-          <TouchableOpacity
-            key={t.key}
-            style={[styles.chartTab, chartTab === t.key && styles.chartTabActive]}
-            onPress={() => setChartTab(t.key)}
-          >
-            <Text style={[styles.chartTabText, chartTab === t.key && { color: C.solar }]}>
-              {t.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      <View style={styles.chartCard}>
-        {/* Peak info (power tab only) */}
-        {chartTab === 'power' && peaks && (
-          <View style={styles.peaksRow}>
-            {[
-              { label: 'Solar pico', val: peaks.maxSolar.val, time: peaks.maxSolar.time, color: C.solar },
-              { label: 'Consumo pico', val: peaks.maxCons.val, time: peaks.maxCons.time, color: C.consumption },
-              { label: 'Bateria pico', val: peaks.maxBat.val, time: peaks.maxBat.time, color: C.battery },
-            ].map((p) => (
-              <View key={p.label} style={styles.peakItem}>
-                <View style={[styles.peakDot, { backgroundColor: p.color }]} />
-                <View>
-                  <Text style={styles.peakLabel}>{p.label}</Text>
-                  <Text style={[styles.peakValue, { color: p.color }]}>
-                    {formatKw(p.val)} <Text style={styles.peakTime}>({p.time})</Text>
-                  </Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Legend (power tab) */}
-        {chartTab === 'power' && (
-          <View style={styles.legend}>
-            {[
-              { label: 'Solar', color: C.solar },
-              { label: 'Rede', color: C.grid },
-              { label: 'Bateria', color: C.battery },
-              { label: 'Consumo', color: C.consumption },
-            ].map((l) => (
-              <View key={l.label} style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: l.color }]} />
-                <Text style={styles.legendText}>{l.label}</Text>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {loadingHistory ? (
-          <View style={styles.chartPlaceholder}>
-            <ActivityIndicator color={C.solar} />
-            <Text style={[styles.chartPlaceholderText, { color: C.solar }]}>Carregando histórico...</Text>
-          </View>
-        ) : !hasHistory ? (
-          <View style={styles.chartPlaceholder}>
-            <Text style={styles.chartPlaceholderText}>Sem dados históricos disponíveis</Text>
-          </View>
-        ) : chartTab === 'soc' ? (
-          <LineChart
-            data={{
-              labels: sparseLabels,
-              datasets: [{ data: socData, color: () => C.soc, strokeWidth: 2 }],
-            }}
-            width={SCREEN_WIDTH - 32}
-            height={200}
-            yAxisSuffix="%"
-            chartConfig={{ ...chartConfig, color: () => C.soc }}
-            bezier
-            style={styles.chart}
-            withDots={false}
-            withShadow={false}
-          />
-        ) : (
-          // Power: 4 lines — react-native-chart-kit supports multiple datasets
-          <LineChart
-            data={{
-              labels: sparseLabels,
-              datasets: [
-                { data: powerDatasets.solar, color: () => C.solar, strokeWidth: 2 },
-                { data: powerDatasets.grid,  color: () => C.grid,  strokeWidth: 2 },
-                { data: powerDatasets.bat,   color: () => C.battery, strokeWidth: 2 },
-                { data: powerDatasets.cons,  color: () => C.consumption, strokeWidth: 2 },
-              ],
-            }}
-            width={SCREEN_WIDTH - 32}
-            height={200}
-            yAxisSuffix="k"
-            chartConfig={chartConfig}
-            bezier
-            style={styles.chart}
-            withDots={false}
-            withShadow={false}
-          />
-        )}
-      </View>
-
-      {/* ── Histórico Mensal ── */}
-      <Text style={styles.sectionLabel}>HISTÓRICO MENSAL</Text>
+      {/* ══ GERAÇÃO SOLAR (mensal) ═══════════════════════════════════════════ */}
+      <Text style={styles.section}>GERAÇÃO SOLAR</Text>
       <MonthlyBarChart
         data={monthlyData}
         loading={loadingMonthly}
         year={chartMonth.year}
         month={chartMonth.month}
-        onPrevMonth={handlePrevMonth}
-        onNextMonth={handleNextMonth}
+        onPrevMonth={prevMonth}
+        onNextMonth={nextMonth}
       />
 
-      {/* ── Inversor ── */}
+      {/* ══ INFORMAÇÕES DO INVERSOR ══════════════════════════════════════════ */}
       <View style={styles.card}>
-        <Text style={styles.cardLabel}>INVERSOR</Text>
-        <Text style={styles.inverterModel}>{data?.powerRatingText ?? '—'}</Text>
-        <Text style={styles.cardSub}>Bateria: {data?.batteryType ?? '—'}</Text>
-        <Text style={styles.cardSub}>Serial: {serialNum}</Text>
-        <Text style={styles.cardSub}>Última atualização: {data?.deviceTime ?? '—'}</Text>
+        <Text style={styles.section} numberOfLines={1}>INVERSOR</Text>
+        <View style={styles.infoGrid}>
+          {[
+            { label: 'Modelo',       val: raw?.powerRatingText ?? '—' },
+            { label: 'Bateria',      val: raw?.batteryType     ?? '—' },
+            { label: 'Serial',       val: serialNum            ?? '—' },
+            { label: 'Atualizado',   val: raw?.deviceTime      ?? '—' },
+          ].map((r) => (
+            <View key={r.label} style={styles.infoRow}>
+              <Text style={styles.infoLabel}>{r.label}</Text>
+              <Text style={styles.infoVal} numberOfLines={1}>{r.val}</Text>
+            </View>
+          ))}
+        </View>
       </View>
 
-      <Text style={styles.footer}>Atualiza a cada 30s · Puxe para atualizar</Text>
+      <Text style={styles.footer}>Puxe para atualizar · intervalo 30s</Text>
     </ScrollView>
   );
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
+  root: { flex: 1, backgroundColor: C.bg },
 
-  // Header
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, paddingTop: 48 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 4 },
   backBtn: { fontSize: 14, color: C.solar, fontWeight: '700' },
   badge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 20 },
   badgeDot: { width: 6, height: 6, borderRadius: 3 },
   badgeText: { fontSize: 11, fontWeight: '700' },
-  plantName: { fontSize: 20, fontWeight: '800', color: C.text, paddingHorizontal: 20, marginBottom: 4 },
 
-  // Offline
-  offlineBanner: { backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440', margin: 16, borderRadius: 12, padding: 12 },
-  offlineTitle: { fontSize: 13, fontWeight: '700', color: '#ef4444' },
-  offlineSub: { fontSize: 11, color: C.sub, marginTop: 2 },
+  plantName: { fontSize: 22, fontWeight: '800', color: C.text, paddingHorizontal: 20, marginTop: 8 },
+  plantSub: { fontSize: 12, color: C.muted, paddingHorizontal: 20, marginBottom: 4 },
 
-  // Section
-  sectionLabel: { fontSize: 11, color: C.muted, fontWeight: '700', letterSpacing: 1, paddingHorizontal: 20, marginBottom: 10, marginTop: 16 },
+  section: { fontSize: 11, color: C.muted, fontWeight: '700', letterSpacing: 1, paddingHorizontal: 20, marginTop: 20, marginBottom: 10 },
 
-  // Metrics grid
-  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingHorizontal: 16, marginBottom: 12 },
-  metricCard: { backgroundColor: C.card, borderRadius: 14, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: C.border, width: '47%' },
-  metricIcon: { fontSize: 24, marginBottom: 6 },
-  metricValue: { fontSize: 18, fontWeight: '800' },
-  metricLabel: { fontSize: 11, color: C.muted, marginTop: 3, fontWeight: '600' },
+  // Metrics 2×2 grid
+  grid4: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingHorizontal: 16, marginBottom: 10 },
+  metCard: { width: '47%', backgroundColor: C.card, borderRadius: 14, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  metIcon: { fontSize: 24, marginBottom: 4 },
+  metVal: { fontSize: 17, fontWeight: '800' },
+  metLabel: { fontSize: 11, color: C.muted, marginTop: 3, fontWeight: '600', textAlign: 'center' },
 
-  // Card
-  card: { backgroundColor: C.card, borderRadius: 16, padding: 16, marginHorizontal: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border },
-  cardLabel: { fontSize: 11, color: C.muted, fontWeight: '700', letterSpacing: 1, marginBottom: 10 },
-  cardSub: { fontSize: 12, color: C.muted, marginTop: 4 },
+  // Generic card
+  card: { backgroundColor: C.card, borderRadius: 16, padding: 16, marginHorizontal: 16, marginBottom: 10, borderWidth: 1, borderColor: C.border },
+  cardTitle: { fontSize: 15, fontWeight: '700', color: C.text },
+  cardSub: { fontSize: 12, color: C.sub, marginTop: 3 },
 
-  // Battery bar
-  batteryRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  batteryBarBg: { flex: 1, height: 18, backgroundColor: C.bg, borderRadius: 9, overflow: 'hidden' },
-  batteryFill: { height: '100%', borderRadius: 9 },
-  socText: { fontSize: 20, fontWeight: '800', minWidth: 50, textAlign: 'right' },
+  row: { flexDirection: 'row', alignItems: 'center' },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
 
-  // Chart tabs
-  chartTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 10 },
-  chartTab: { paddingVertical: 7, paddingHorizontal: 16, borderRadius: 20, backgroundColor: C.card, borderWidth: 1, borderColor: C.border },
-  chartTabActive: { backgroundColor: C.solar + '22', borderColor: C.solar },
-  chartTabText: { fontSize: 12, color: C.muted, fontWeight: '600' },
+  activityCircle: { width: 44, height: 44, borderRadius: 22, borderWidth: 2, borderColor: C.solar + '99', justifyContent: 'center', alignItems: 'center' },
 
-  // Chart card
-  chartCard: { backgroundColor: C.card, borderRadius: 16, paddingTop: 16, paddingBottom: 12, marginHorizontal: 16, marginBottom: 12, borderWidth: 1, borderColor: C.border },
-  chart: { borderRadius: 12 },
-  chartPlaceholder: { height: 200, justifyContent: 'center', alignItems: 'center', gap: 10 },
-  chartPlaceholderText: { fontSize: 13, color: C.muted },
+  // SOC bar
+  socRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 4 },
+  socBarBg: { flex: 1, height: 18, backgroundColor: C.bg, borderRadius: 9, overflow: 'hidden' },
+  socFill: { height: '100%', borderRadius: 9 },
+  socPct: { fontSize: 20, fontWeight: '800', minWidth: 52, textAlign: 'right' },
+
+  // Date nav
+  dateBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: C.bg, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  dateBtnText: { fontSize: 24, color: C.solar, fontWeight: '700', lineHeight: 28 },
+  dateLabel: { fontSize: 15, color: C.text, fontWeight: '700', minWidth: 110, textAlign: 'center' },
 
   // Peaks
-  peaksRow: { gap: 8, paddingHorizontal: 16, marginBottom: 12 },
+  peaksRow: { gap: 8, marginBottom: 10 },
   peakItem: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  peakDot: { width: 8, height: 8, borderRadius: 4, marginTop: 2 },
+  peakDot: { width: 8, height: 8, borderRadius: 4, marginTop: 1 },
   peakLabel: { fontSize: 10, color: C.muted, fontWeight: '600' },
-  peakValue: { fontSize: 13, fontWeight: '700' },
+  peakVal: { fontSize: 13, fontWeight: '700' },
   peakTime: { fontSize: 10, color: C.muted, fontWeight: '400' },
 
-  // Legend
-  legend: { flexDirection: 'row', gap: 14, paddingHorizontal: 16, marginBottom: 12 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  // Legend chips
+  legendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
+  legendChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5, paddingHorizontal: 10, borderRadius: 20, backgroundColor: C.bg, borderWidth: 1, borderColor: C.border },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
-  legendText: { fontSize: 11, color: C.muted },
+  legendText: { fontSize: 12, color: C.sub },
 
-  // Inversor
-  inverterModel: { fontSize: 15, fontWeight: '700', color: C.text, marginBottom: 4 },
+  // Chart placeholder
+  chartPlaceholder: { height: 220, justifyContent: 'center', alignItems: 'center' },
 
-  // Footer
-  footer: { textAlign: 'center', color: C.border, fontSize: 11, padding: 20 },
+  // Inversor info
+  infoGrid: { gap: 8, marginTop: 8 },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  infoLabel: { fontSize: 12, color: C.muted, fontWeight: '600' },
+  infoVal: { fontSize: 12, color: C.text, flex: 1, textAlign: 'right' },
+
+  footer: { textAlign: 'center', color: C.border, fontSize: 11, padding: 24 },
 });
